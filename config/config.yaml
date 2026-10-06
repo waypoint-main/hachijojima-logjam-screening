@@ -1,0 +1,342 @@
+# =============================================================================
+# Hachijojima typhoon-change / large-woody-debris (LWD) logjam PoC — configuration
+# =============================================================================
+# Everything tunable lives here. Values marked [UNCALIBRATED] are expert-judgement
+# starting points, NOT scientifically validated. Calibrate against validation data
+# (see docs/ARCHITECTURE.md §Validation) before using results operationally.
+# Sections tagged "Phase N" are read only by later phases.
+
+project:
+  name: hachijojima_lwd_poc
+  data_dir: data            # relative to project root
+  log_level: INFO
+
+# --- Study area --------------------------------------------------------------
+study_area:
+  name: Hachijojima
+  # Extended south to 33.00 after the first run showed the island's southern tip was clipped at 33.05.
+  # Generous WGS84 bbox (min_lon, min_lat, max_lon, max_lat) around the island.
+  # Check against the DEM coastline on first run; the island mask is derived from the DEM.
+  bbox: [139.72, 33.00, 139.90, 33.20]
+  analysis_crs: "EPSG:32654"   # UTM 54N (139.8E lies in 138–144E). Metric CRS for all analysis.
+
+# --- Temporal strategy (Phase 2+) -------------------------------------------
+# Composites are built per window. Windows are fully configurable; add as many
+# named sub-windows (seasons, post-event) as wanted.
+periods:
+  baseline_start: "2025-01-01"
+  baseline_end:   "2025-10-05"      # SEASON-MATCHED to the after window (same Jan 1 - Oct 5 day-of-year span)
+  after_start:    "2026-01-01"
+  after_end:      "2026-10-05"      # "2026 in general" (year to date); end date is exclusive in GEE
+  # Season-matched comparison reduces phenology bias. Months are 1-12.
+  # Set to null to use the whole window.
+  season_months: null               # e.g. [6,7,8,9,10]
+  # Event-specific post-typhoon windows. Fill in once dates are known.
+  # Each: {name, event_start, event_end, post_window_days, pre_window_days}
+  events: []
+  # Named comparison scenarios (select with `--scenario NAME`; default = the windows above, files unsuffixed).
+  # post_event: dated from the island time series (scripts/island_timeseries.py): an abrupt exposed-vs-sheltered
+  # forest NDVI/NBR step between 2025-10-02 and 2025-10-05 that persists through 2026. The date is INFERRED
+  # FROM IMAGERY ONLY — not matched to a named storm. See docs/VALIDATION_FLAGS.md. [UNVALIDATED]
+  scenarios:
+    post_event:
+      baseline_start: "2025-01-01"
+      baseline_end:   "2025-10-01"   # ends before the inferred event
+      after_start:    "2025-10-06"   # first days after the inferred event
+      after_end:      "2026-02-01"   # ~4 months: peak damage, limited regrowth
+  #  - name: "typhoon_example"
+  #    event_start: "2026-09-01"
+  #    event_end:   "2026-09-03"
+  #    pre_window_days: 60
+  #    post_window_days: 30
+
+# --- DEM / terrain (Phase 1) -------------------------------------------------
+dem:
+  # gee            : Earth Engine asset below, exported on the analysis grid (default)
+  # copernicus_aws : Copernicus GLO-30 COG tiles from the public AWS bucket (30 m)
+  # local_file     : any GeoTIFF you supply (BEST for forest: GSI DEM5A/5B/10B ground surface)
+  # FABDEM (canopy-removed) exists in the GEE community catalog but is CC BY-NC-SA
+  # (non-commercial) — not used by default for a company workflow.
+  source: gee
+  gee_asset: COPERNICUS/DEM/GLO30_2024_1   # collection; older GLO30 id is deprecated
+  gee_band: DEM                            # alt: JAXA/ALOS/AW3D30/V3_2 with band DSM
+  local_path: null                  # used when source == local_file
+  raw_filename: dem_raw.tif
+  target_resolution_m: 30           # resampled analysis grid. Use 10 for a 10 m GSI DEM.
+  resampling: bilinear
+  sea_level_m: 0.5                  # cells <= this are treated as sea (masked)
+  min_island_cells: 200             # drop tiny islets/noise from the land mask
+
+terrain:
+  slope_method: horn                # Horn (1981) 3x3
+  hillshade_azimuth: 315
+  hillshade_altitude: 45
+
+hydrology:
+  fill_epsilon_m: 0.00001           # Barnes et al. (2014) epsilon-filling increment
+  # Stream initiation threshold as contributing AREA (m^2), so it is resolution-independent.
+  # Hachijojima has short, steep, radial streams on porous volcanic ground; many
+  # headwaters are ephemeral. [UNCALIBRATED] tune against hydrography / imagery.
+  stream_threshold_area_m2: 50000   # 0.05 km^2
+  min_isolated_stream_length_m: 60  # drop isolated head->sea stubs shorter than this (topology otherwise kept)
+  strahler_min_order_for_reaches: 1
+  # Comparison to existing hydrography
+  reference_hydrography:
+    source: osm                     # osm | local_file | none
+    local_path: null                # e.g. MLIT/GSI river centerlines (GeoPackage/Shapefile)
+    match_tolerance_m: 45           # ~1.5 DEM cells at 30 m
+    # MERIT Hydro (GEE: MERIT/Hydro/v1_0_1, ~93 m, bands upa km², wth, hnd, elv, dir).
+    # Used ONLY as a coarse sanity check of derived network/contributing area; at 93 m it
+    # cannot represent most Hachijojima streams.
+    merit:
+      enabled: true
+      asset: MERIT/Hydro/v1_0_1
+      river_upa_min_km2: 0.5        # MERIT cells with upa >= this are 'river'
+      match_tolerance_m: 140        # ~1.5 MERIT cells
+
+# --- River reaches & corridor (Phase 1 geometry; Phase 6 scoring) -----------
+reaches:
+  length_m: 100                     # configurable reach length (50 / 100 / ...)
+  # Each stream link is split into n = max(1, round(link_length / length_m)) EQUAL reaches,
+  # so actual reach length is within ~[0.67, 1.5] x length_m (no tiny trailing stubs).
+  curvature_window_m: 300           # window for sinuosity / bend metric (D8 paths are jagged at 30 m)
+  slope_window_m: 100               # window for local channel slope (elev drop / length)
+corridor:
+  buffer_m: 100                     # river-corridor half-width for corridor-focused analysis
+
+# --- Roads / crossings ------------------------------------------------------
+# First real run: OSM has ~550 km of roads/tracks on this 70 km² island and 54 % of reaches touched a
+# road — useless as a discriminator. Footpaths are ignored, farm/forest tracks are a LOWER class, and
+# crossings of tiny gullies are ignored (they cannot trap large wood).
+crossings:
+  source: osm                       # osm | local_file | none
+  local_path: null
+  snap_tolerance_m: 15
+  reach_match_tolerance_m: 30       # crossing within this distance of a reach flags it
+  major_highways: [motorway, trunk, primary, secondary, tertiary, unclassified, residential]
+  minor_highways: [service, track]  # counted as 'minor' crossings (lower weight in Phase 6)
+  # ignored: footway, path, steps, pedestrian, cycleway, bridleway, rest_area, construction
+  min_upstream_area_m2: 200000      # only reaches draining >= 0.2 km² can be flagged [UNCALIBRATED]
+
+# --- Google Earth Engine (Phase 1 DEM/MERIT, Phase 2 composites) -------------
+gee:
+  project: ee-alexdeclaro
+  export_scale_m: 10                # Sentinel-1/2 export resolution (grid snapped to 30 m multiples)
+  tile_px: 400                      # download tile edge in pixels (keeps requests < 32 MB)
+  sentinel1:
+    mode: builtin                   # builtin | user_module (if you later want to plug in your own)
+    user_module: src.gee.user_sentinel1
+    user_function: get_sentinel1_collection
+    collection: COPERNICUS/S1_GRD   # GRD, IW, dB, thermal-noise removed, calibrated, orthorectified
+    instrument_mode: IW
+    # null => auto-select the single pass/relative-orbit with the most obs in BOTH periods.
+    # Mixing geometries is NOT allowed: on steep volcanic slopes geometry changes backscatter
+    # more than most real change does.
+    orbit_pass: null                # ASCENDING | DESCENDING | null
+    relative_orbit: null            # integer | null
+    min_obs_per_period: 5
+    vv_min_db: -30                  # mask border noise / no-data / extreme dark
+    vh_min_db: -35
+    incidence_min_deg: 30.5         # trim swath edges
+    incidence_max_deg: 45.0
+    mask_layover_shadow: true       # approximate, DEM-based (see sentinel1.py)
+    layover_shadow_margin_deg: 3
+    # Approximate satellite heading (deg clockwise from N); right-looking => look = heading+90.
+    heading_deg: {ASCENDING: -12.0, DESCENDING: -168.0}
+    speckle_focal_radius_px: 1      # spatial median on composite stats; 0 disables
+  sentinel2:
+    collection: COPERNICUS/S2_SR_HARMONIZED
+    cloud_score_collection: GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED
+    cs_band: cs_cdf
+    cs_threshold: 0.60              # catalog suggests 0.50-0.65 [UNCALIBRATED here]
+    max_scene_cloud_pct: 90         # coarse pre-filter only; per-pixel Cloud Score+ is the real mask
+    bands: [B2, B3, B4, B8, B11, B12]
+    min_valid_obs: 10               # summits are cloud-capped (first run: ~8-15 clear obs there)
+  land_mask_dem_min_m: 0.5          # mask sea in SAR/optical composites using the GEE DEM
+
+# --- Features (Phase 2-3) ---------------------------------------------------
+sentinel1_features:
+  statistics: [median, min, max, stdDev]
+  derived: [vv_vh_ratio_db, log_ratio_vv, log_ratio_vh, diff_db]
+  speckle_filter: user_defined      # whatever the user's GEE code applies
+  mask_layover_shadow: true
+sentinel2_features:
+  indices: [NDVI, NDMI, NBR, MNDWI, BSI]
+
+# --- Change detection (Phase 3) ---------------------------------------------
+# All thresholds are [UNCALIBRATED] starting points chosen from the first real run
+# (SAR sampling noise ~0.75 dB; optical anomaly MAD ~0.04-0.05). Calibrate against validation data.
+change:
+  # Island-wide offset between periods (seasonal/sensor/background effects, OR real island-wide
+  # storm effects) is estimated and subtracted so that only LOCAL anomalies are flagged.
+  # mode (default; robust when a big fraction of pixels truly changed) | median | none.
+  # Both mode and median are always reported in phase3_qa.json — nothing is silently discarded.
+  regional_shift: mode
+  sar:
+    min_obs: 5                      # per period; pixels with fewer scenes are excluded
+    se_floor_db: 0.3                # floor on sampling-noise estimate
+    z_threshold: 3.0                # |anomaly| / standard error
+    min_abs_anomaly_db: 2.0         # and at least this large in dB
+    z_saturation: 6.0               # z at which the SAR score reaches 1
+    persistence_sd_k: 1.0           # 'persistent' = extreme post scene beyond baseline median by >= k baseline std devs
+  optical:
+    min_clear_obs: 5
+    veg_min_baseline_ndvi: 0.3      # 'vegetated' in baseline
+    veg_loss_dNDVI: -0.10           # anomaly (after shift removal)
+    veg_loss_dNBR: -0.12
+    exposed_soil_dBSI: 0.12
+    exposed_soil_dNDVI: -0.10
+    landslide_dNDVI: -0.25          # near-total vegetation removal ...
+    landslide_dBSI: 0.20            # ... with strong soil signal ...
+    landslide_min_slope_deg: 20     # ... on slopes >= this = landslide CANDIDATE
+    water_dMNDWI: 0.15              # |anomaly|; rare at 10 m for narrow streams
+    score_saturation: {dNDVI: 0.25, dNBR: 0.30, dBSI: 0.30}
+  min_patch_area_m2: 2000           # minimum mapping unit (20 px at 10 m)
+  agreement_dilate_px: 1            # SAR and optical flags 'agree' if within this many px
+  pixel_confidence:                 # heuristic 0-1 index, NOT a probability
+    magnitude: 0.35
+    sensor_agreement: 0.25
+    s1_observations: 0.20           # saturates at s1_obs_full
+    s2_observations: 0.20           # saturates at s2_obs_full
+  s1_obs_full: 15
+  s2_obs_full: 20
+
+# --- Wood source / delivery (Phases 4-5) ------------------------------------
+wood_model:
+  forest_ndvi_min: 0.6              # baseline forest mask [UNCALIBRATED]
+  # --- Phase 4: forest definition and woody-debris SOURCE areas ---------------
+  landcover:
+    asset: ESA/WorldCover/v200      # 10 m, 2021, CC BY 4.0. Class 10 = tree cover. Fixed year: it does NOT see 2021-2025 cover change.
+    band: Map
+    tree_class: 10
+  # worldcover : forest = WorldCover tree class
+  # ndvi       : forest = baseline NDVI >= forest_ndvi_min (Phase 3 default)
+  # both       : WorldCover tree AND baseline NDVI >= forest_ndvi_min (conservative; recommended)
+  forest_definition: both
+  source_change_classes: [1, 3]     # forest_disturbance, landslide_candidate (Phase 3 class codes)
+  source_min_confidence: 0.40       # Phase 3 heuristic confidence index [UNCALIBRATED]
+  source_min_patch_area_m2: 2000
+  # --- Phase 5: delivery ---
+  channel_transport_decay_m: 1500   # wood supply carried down the channel is attenuated by exp(-L/this) [UNCALIBRATED]
+  delivery_normalization_percentile: 100  # raw delivery -> 0-1: log1p(raw)/log1p(this percentile of reaches with raw>0), clipped. 100 = max (keeps the full ranking; 95 saturated the top 5% at 1.0)
+  riparian_band_m: 60               # band around streams used for 'riparian disturbed fraction'
+  near_stream_m: [100, 300]         # distance bands (m) used to summarise source-to-stream proximity
+  slope_factor_deg: {low: 5, high: 35}      # terrain factor ramps 0→1 across this range
+  delivery_max_distance_m: 300      # downslope flow-path distance beyond which delivery→0
+  distance_decay: exponential
+  distance_decay_scale_m: 120
+
+# --- Logjam susceptibility (Phase 6) ----------------------------------------
+# [UNCALIBRATED] Expert-judgement weights. Weights are normalised to sum to 1.
+# Each variable is first normalised to 0-1 (percentile / min-max, documented per variable).
+susceptibility:
+  weights:
+    wood_delivery_score: 0.25
+    upstream_disturbance_pct: 0.10
+    disturbance_to_stream_proximity: 0.10
+    upstream_landslide: 0.08
+    slope_break: 0.10               # upstream slope - local slope (deposition zone)
+    low_local_slope: 0.05
+    upstream_area: 0.07             # larger flows can transport more wood
+    channel_constriction: 0.08
+    curvature_bend: 0.05
+    confluence: 0.04
+    road_crossing: 0.04
+    bridge: 0.02
+    observed_river_change: 0.02     # kept tiny here: observed change is scored separately
+  class_breaks: [0.25, 0.50, 0.75]  # Low | Moderate | High | Very High
+  class_labels: [Low, Moderate, High, "Very High"]
+  # Each driver is mapped to 0-1 by a linear ramp [lo, hi] (log10 ramp where log: true). ABSOLUTE ramps, not
+  # percentile ranks, so the classes mean the same thing in any scenario. All bounds [UNCALIBRATED].
+  ramps:
+    upstream_disturbance_pct: {lo: 0,      hi: 40}      # % of upstream forest flagged as source
+    disturbance_to_stream_proximity: {lo: 0, hi: 0.5}   # fraction of riparian (60 m) forest that is a source
+    upstream_landslide: {lo: 0,            hi: 30000, log: false}   # m2 of upstream landslide-candidate source
+    slope_break: {lo: 0,                   hi: 0.10}    # (mean channel slope of ~3 reaches upstream) - (local), m/m
+    low_local_slope: {lo: 0.05,            hi: 0.20, invert: true}  # <=0.05 m/m -> 1 (deposition-prone)
+    upstream_area: {lo: 50000,             hi: 5000000, log: true}  # m2
+    channel_constriction: {lo: 0.15,       hi: 0.60}    # valley confinement proxy: mean rise per m of lateral distance, 30-90 m band
+    curvature_bend: {lo: 1.0,              hi: 1.30}    # sinuosity over the curvature window
+    observed_river_change: {lo: 0,         hi: 0.5}     # fraction of the 60 m corridor with Phase-3 change flags
+  crossing_values: {major: 1.0, minor: 0.5}   # road_crossing driver by crossing_type
+  bridge_or_culvert_value: 1.0
+  upstream_slope_steps: 3           # reaches walked upstream when computing the upstream channel slope
+  sensitivity: {n_draws: 300, relative_perturbation: 0.5, seed: 42}
+
+# --- Observed change (Phase 7) ----------------------------------------------
+observed_change:
+  corridor_buffer_m: 50
+  core_buffer_m: 15                 # channel + immediate bank (about 3 px wide at 10 m); used for debris evidence
+  coastal_exclusion_m: 100          # water_change ignored this close to the sea (tide/glint artefacts)
+  min_valid_corridor_px: 30         # reaches with fewer valid corridor pixels get no observed score
+  # Each metric (a fraction of valid corridor pixels) -> 0-1 by a linear ramp [lo, hi]. [UNCALIBRATED]
+  ramps:
+    sar_change: {lo: 0, hi: 0.30}
+    sar_persistence: {lo: 0, hi: 0.15}
+    optical_vegetation_loss: {lo: 0, hi: 0.50}
+    optical_exposed_material: {lo: 0, hi: 0.15}
+    water_change: {lo: 0, hi: 0.10}
+    spatial_concentration_min_frac: 0.05   # concentration counts only when >= this share of the corridor is flagged
+  # channel_morphology cannot be measured at 10 m (streams are narrower than a pixel): it is reported as unavailable
+  # and the remaining weights are renormalised.
+  # --- satellite evidence of obstruction / debris (hypotheses, NOT confirmation) ---
+  debris:
+    optical_dilate_px: 1
+    probable_min_area_m2: 400       # SAR(persistent increase) AND optical channel disturbance agreeing in the core zone
+    probable_min_patch_px: 3
+    possible_min_area_m2: 200       # one-sensor in-channel anomaly, compact, on a high-susceptibility reach
+    possible_min_patch_px: 2
+    possible_min_susceptibility: 0.50
+    possible_min_patch_share: 0.50  # largest patch / all flagged core pixels (localised, not diffuse)
+    possible_min_core_change_frac: 0.25   # >= 25% of core pixels show observed change ...
+    possible_min_contrast_ratio: 1.5      # ... and at least 1.5x the change fraction of the surrounding corridor ring
+    ring_floor_frac: 0.02                 # floor for the ring fraction when forming the ratio
+  weights:
+    sar_change: 0.30
+    sar_persistence: 0.10
+    optical_vegetation_loss: 0.15
+    optical_exposed_material: 0.15
+    water_change: 0.10
+    spatial_concentration: 0.10
+    channel_morphology: 0.10
+  class_breaks: [0.25, 0.50, 0.75]
+
+# --- Priority (Phase 8) -----------------------------------------------------
+priority:
+  # Rule-based classes + a continuous score for ranking inside each class. All thresholds [UNCALIBRATED].
+  #   Priority 1: high susceptibility AND strong observed change AND obstruction-consistent (a Probable/Possible flag)
+  #   Priority 2: high susceptibility AND (strong observed change OR an obstruction flag)
+  #   Priority 3: watch list: high susceptibility with moderate change, OR strong change on a moderately susceptible reach
+  #   Baseline  : everything else
+  method: matrix_plus_rank
+  # priority_score = w_s * S + w_o * O + w_i * (S * O)   (interaction kept small and explicit)
+  w_susceptibility: 0.45
+  w_observed: 0.35
+  w_interaction: 0.20
+  high_susceptibility_min: 0.50
+  strong_change_min: 0.50
+  moderate_change_min: 0.25
+  watch_susceptibility_min: 0.35
+  small_catchment_m2: 200000               # reaches draining less than this (0.2 km2) are flagged as possible dry gullies
+  obstruction_consistency_required: true   # Priority 1 needs a Probable Debris Accumulation / Possible Logjam flag
+  confidence_class_breaks: [0.50, 0.75]    # Low < 0.50 <= Medium < 0.75 <= High
+
+confidence:
+  weights:
+    s1_availability: 0.25
+    s2_valid_fraction: 0.20
+    temporal_coverage: 0.20
+    sensor_agreement: 0.20
+    change_magnitude_persistence: 0.15
+
+# --- Outputs ----------------------------------------------------------------
+outputs:
+  figure_dpi: 200
+  gis_format: GPKG
+  # Terminology policy: never "confirmed logjam" without validation data
+  allowed_labels: ["Possible Logjam", "Probable Debris Accumulation",
+                   "High Logjam Susceptibility", "Priority Inspection Location"]
+
+validation:
+  reference_points_path: null       # CSV/GPKG of interpreted VHR / field / drone sites
+  reference_label_column: label
