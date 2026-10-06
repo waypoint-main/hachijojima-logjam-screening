@@ -1,12 +1,22 @@
+# Raw / intermediate data stay local (rebuildable with the pipeline)
 data/raw/*
 data/interim/*
 data/processed/*
-data/outputs/*
 !data/*/.gitkeep
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-data/
+
+# Deployable app outputs: the Streamlit app reads these
+data/outputs/*
+!data/outputs/river_reaches*.gpkg
+!data/outputs/river_reaches*.geojson
+!data/outputs/maps*/
+!data/outputs/overlays*/
+!data/outputs/tables/
+
+# Local / generated
 app/static/
 __pycache__/
+*.pyc
 .pytest_cache/
+.ipynb_checkpoints/
+.venv/
+.DS_Store
