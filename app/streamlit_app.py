@@ -135,6 +135,14 @@ def _overlays(tag: str):
     return out
 
 
+PHOTO_DIR = ROOT / "field_photos"
+
+
+@st.cache_data(show_spinner=False)
+def _photos():
+    return q.load_field_photos(PHOTO_DIR / "photos.csv")
+
+
 def _bitmap(ov, name, opacity):
     if name not in ov:
         return None
@@ -221,6 +229,13 @@ def _map(data, sel, view, tag, opacity=0.85, show_all=True, selected=None, heigh
             p1["n"] = [str(i + 1) for i in range(len(p1))]
             layers.append(pdk.Layer("TextLayer", p1, get_position=["lon", "lat"], get_text="n", get_size=15, get_color=[255, 255, 255],
                                     get_background_color=[215, 25, 28], background=True, get_text_anchor="'middle'", pickable=False))
+    ph = _photos()
+    if len(ph) and selected is None:                                    # field photos: ring + label on every map view
+        layers.append(pdk.Layer("ScatterplotLayer", ph, get_position=["lon", "lat"], get_fill_color=[255, 255, 255, 60], get_line_color=[20, 20, 20],
+                                stroked=True, filled=True, get_radius=18, radius_min_pixels=9, line_width_min_pixels=3, pickable=False))
+        ph = ph.assign(label=["Photo " + str(i) for i in ph["photo_id"]])
+        layers.append(pdk.Layer("TextLayer", ph, get_position=["lon", "lat"], get_text="label", get_size=13, get_color=[20, 20, 20],
+                                get_background_color=[255, 255, 255, 235], background=True, get_pixel_offset=[0, -22], pickable=False))
     if selected is not None:
         sl = data[data["reach_id"] == selected].copy(); sl["color"] = [[0, 0, 0, 255]] * len(sl)
         layers.append(_lines(sl, ["reach_id", "color"], 9.0, pickable=False, rounded=True))
@@ -328,7 +343,7 @@ with dc2:
     info("logjam_vs_debris", "logjam", "debris_accumulation", label="ⓘ")
 if len(avail) < 2:
     st.caption("Only one comparison window has been processed. Run Phase 9 for the other window to enable the switch and the comparison tab.")
-TAB_NAMES = ["Overview", "Map", "Inspection list", "Reach details", "Window comparison", "Map gallery", "Glossary", "Method & limits"]
+TAB_NAMES = ["Overview", "Map", "Map gallery", "Inspection list", "Reach details", "Window comparison", "Glossary", "Method & limits"]
 T = dict(zip(TAB_NAMES, st.tabs(TAB_NAMES)))
 
 # ---------------------------------------------------------------- overview
@@ -384,6 +399,39 @@ with T["Map"]:
     _map(data, sel, view, tag, opacity=opacity, show_all=show_all)
     st.caption("Hover a reach for its values. Scroll to zoom, drag to pan.")
     terms_box(VIEW_TERMS[view])
+    photos = _photos()
+    if len(photos):
+        st.markdown("#### Field photos (visual checks)")
+        pid = st.radio("Photo", list(photos["photo_id"]), horizontal=True, label_visibility="collapsed") if len(photos) > 1 else photos["photo_id"].iloc[0]
+        p = photos[photos["photo_id"] == pid].iloc[0]
+        pc1, pc2 = st.columns([1, 2])
+        f = PHOTO_DIR / str(p["file"])
+        if f.exists():
+            pc1.image(str(f), use_container_width=True)
+        nr = q.nearest_reach(data, float(p["lat"]), float(p["lon"]))
+        with pc2:
+            st.markdown(f"**{p['photo_id']} · {p['title']}**  \n{p['lat']:.5f}° N, {p['lon']:.5f}° E" + (f"  ·  {p['date']}" if isinstance(p["date"], str) else ""))
+            st.write(p["what_it_shows"])
+            if nr:
+                r = nr["row"]
+                st.markdown(f"**What the satellite screening says here.** Nearest river reach: **{nr['reach_id']}**, {nr['distance_m']:.0f} m from the photo point. "
+                            f"Priority class: **{r['priority_class']}**; observed change: **{num(r.get('observed_change_score'))}**"
+                            f" ({r.get('observed_change_class') or 'no class'}); satellite debris flag: **{r.get('debris_flag') or 'none'}**.")
+                if nr["distance_m"] > 100:
+                    st.caption("This reach is more than 100 m away, so it may not be the stream the photo relates to.")
+            ov = _overlays(tag)
+            if "change" in ov:
+                import json as _json
+                png = _cfg().path("outputs", f"overlays{tag}") / _json.loads((_cfg().path("outputs", f"overlays{tag}") / "overlays.json").read_text())["change"]["file"]
+                cl = q.change_classes_near(png, ov["change"][1], float(p["lat"]), float(p["lon"]), 30.0)
+                if cl:
+                    top = ", ".join(f"{k.split(' (')[0].lower()} {100 * v:.0f}%" for k, v in sorted(cl.items(), key=lambda kv: -kv[1]))
+                    st.markdown(f"**Observed change within 30 m of the photo point** (share of 10 m pixels): {top}. "
+                                "Compare this with what the photo shows.")
+                else:
+                    st.markdown("**Observed change within 30 m of the photo point:** none detected.")
+            st.caption("A single photo checks one place only. It does not turn any screening label into a confirmed logjam. "
+                       "Add photos by editing `field_photos/photos.csv`.")
 
 # ---------------------------------------------------------------- static maps
 with T["Map gallery"]:

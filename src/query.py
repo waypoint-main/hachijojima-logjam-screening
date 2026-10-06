@@ -120,3 +120,57 @@ def midpoints(df):
     out = pd.DataFrame({"reach_id": df["reach_id"].to_numpy(), "lon": ll.x.to_numpy(), "lat": ll.y.to_numpy()})
     out["debris_flag"] = df["debris_flag"].fillna("").to_numpy() if "debris_flag" in df else ""
     return out
+
+
+def load_field_photos(csv_path):
+    """Field photos table (photo_id, file, lat, lon, date, title, what_it_shows, source). Empty frame if the file is missing."""
+    import pandas as pd
+    cols = ["photo_id", "file", "lat", "lon", "date", "title", "what_it_shows", "source"]
+    try:
+        df = pd.read_csv(csv_path, dtype={"photo_id": str, "file": str})
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame(columns=cols)
+    df = df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    for c in cols:
+        if c not in df:
+            df[c] = None
+    return df[cols]
+
+
+def nearest_reach(df, lat, lon):
+    """Closest river reach to a WGS84 point: dict(reach_id, distance_m, row) or None. Uses the table's own (metric) CRS."""
+    if len(df) == 0:
+        return None
+    import geopandas as gpd
+    from shapely.geometry import Point
+    pt = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(df.crs).iloc[0]
+    d = df.geometry.distance(pt)
+    i = d.idxmin()
+    return dict(reach_id=df.loc[i, "reach_id"], distance_m=float(d.loc[i]), row=df.loc[i])
+
+
+def change_classes_near(png_path, bounds, lat, lon, radius_m=30.0):
+    """Share of each observed-change class (from the Phase 9 'change' overlay PNG) within radius_m of a WGS84 point.
+    Returns {class_name: share_of_all_pixels_in_circle}; {} if the point is outside the overlay. Reads only the exported PNG."""
+    import numpy as np
+    from PIL import Image
+    from .mapping.final_maps import CHANGE_COL, CHANGE_NAME
+    w, s, e, n = bounds
+    if not (w <= lon <= e and s <= lat <= n):
+        return {}
+    im = np.array(Image.open(png_path).convert("RGBA"))
+    H, W = im.shape[:2]
+    mx, my = (e - w) * 111320 * np.cos(np.radians(lat)) / W, (n - s) * 110540 / H          # metres per pixel
+    x, y = (lon - w) / (e - w) * W, (n - lat) / (n - s) * H
+    yy, xx = np.ogrid[:H, :W]
+    inside = ((xx - x) * mx) ** 2 + ((yy - y) * my) ** 2 <= radius_m ** 2
+    px = im[inside]
+    if not len(px):
+        return {}
+    out = {}
+    for k, hx in CHANGE_COL.items():
+        rgb = [int(hx[i:i + 2], 16) for i in (1, 3, 5)]
+        m = (px[:, 3] > 0) & (px[:, :3] == rgb).all(axis=1)
+        if m.any():
+            out[CHANGE_NAME[k]] = float(m.sum()) / len(px)
+    return out

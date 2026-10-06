@@ -264,3 +264,7 @@ Note (v18): pydeck/deck.gl parses string props as expressions, so `data:` URIs a
 ## v21 addendum
 - The app now defaults to the post-event window (pivot: early October 2025; before = to 2025-10-01, after = 2025-10-06 onward). The whole-year 2025-vs-2026 window is the alternative. If only one window has been processed, the app uses that one. Pipeline defaults and file names are unchanged (`--scenario post_event` still writes the `_post_event` files).
 - UI redesign: theme in `.streamlit/config.toml` (forest green / river blue), hero header with the window and data status, shortened disclaimer, "How to use" cards, palette-matched bar charts, simplified sidebar (window, a "which reaches to show" preset, the rest under "More filters"), tabs renamed (Overview, Map, Inspection list, Reach details, Window comparison, Map gallery, Glossary, Method & limits), styled map legend and a filter status line.
+
+## v22 addendum
+- Field photos: `field_photos/photos.csv` + image files. Each photo is drawn on the interactive map (ring + label) and shown under the map with the nearest river reach (`query.nearest_reach`) and the share of observed-change classes within 30 m (`query.change_classes_near`, read from the exported change overlay PNG). Visual checks only: they never change a screening label.
+- Tab order: Overview, Map, Map gallery, Inspection list, Reach details, Window comparison, Glossary, Method & limits.

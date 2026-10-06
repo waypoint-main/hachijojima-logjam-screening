@@ -129,3 +129,28 @@ def test_glossary_covers_app_and_is_plain():
     md = gl.to_markdown()
     for lab in ("Possible Logjam", "Probable Debris Accumulation", "High Logjam Susceptibility", "Priority Inspection Location"):
         assert lab in md
+
+
+def test_field_photos_and_nearest_reach(tmp_path):
+    from src import query as q
+    ph = q.load_field_photos(Path(__file__).resolve().parents[1] / "field_photos" / "photos.csv")
+    assert len(ph) >= 1 and abs(ph["lat"].iloc[0] - 33.07617) < 1e-6 and abs(ph["lon"].iloc[0] - 139.82611) < 1e-6
+    assert (Path(__file__).resolve().parents[1] / "field_photos" / ph["file"].iloc[0]).exists()
+    assert len(q.load_field_photos(tmp_path / "missing.csv")) == 0
+    df = _df()
+    r = q.nearest_reach(df, *[float(v) for v in reversed(q.midpoints(df.iloc[[2]]).iloc[0][["lon", "lat"]].tolist())][::-1][::-1])
+    assert r["reach_id"] == df.iloc[2]["reach_id"] and r["distance_m"] < 1.0
+    assert q.nearest_reach(df.iloc[0:0], 33.0, 139.8) is None
+
+
+def test_change_classes_near(tmp_path):
+    import numpy as np
+    from PIL import Image
+    from src import query as q
+    from src.mapping.final_maps import CHANGE_COL
+    a = np.zeros((40, 40, 4), "uint8"); a[15:25, 15:25] = [*[int(CHANGE_COL[1][i:i + 2], 16) for i in (1, 3, 5)], 255]
+    Image.fromarray(a).save(tmp_path / "c.png")
+    b = [139.0, 33.0, 139.004, 33.004]                      # ~370 m wide, ~9 m pixels
+    r = q.change_classes_near(tmp_path / "c.png", b, 33.002, 139.002, 30.0)
+    assert r and max(r.values()) > 0.5
+    assert q.change_classes_near(tmp_path / "c.png", b, 34.0, 139.002) == {}
