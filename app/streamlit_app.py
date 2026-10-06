@@ -410,8 +410,9 @@ with T["Map"]:
             pc1.image(str(f), use_container_width=True)
         nr = q.nearest_reach(data, float(p["lat"]), float(p["lon"]))
         with pc2:
-            st.markdown(f"**{p['photo_id']} · {p['title']}**  \n{p['lat']:.5f}° N, {p['lon']:.5f}° E" + (f"  ·  {p['date']}" if isinstance(p["date"], str) else ""))
-            st.write(p["what_it_shows"])
+            st.markdown(f"**{p['photo_id']}{' · ' + p['title'] if isinstance(p['title'], str) and p['title'].strip() else ''}**  \n{p['lat']:.5f}° N, {p['lon']:.5f}° E" + (f"  ·  {p['date']}" if isinstance(p["date"], str) else ""))
+            if isinstance(p["what_it_shows"], str) and p["what_it_shows"].strip():
+                st.write(p["what_it_shows"])
             if nr:
                 r = nr["row"]
                 st.markdown(f"**What the satellite screening says here.** Nearest river reach: **{nr['reach_id']}**, {nr['distance_m']:.0f} m from the photo point. "
@@ -430,8 +431,6 @@ with T["Map"]:
                                 "Compare this with what the photo shows.")
                 else:
                     st.markdown("**Observed change within 30 m of the photo point:** none detected.")
-            st.caption("A single photo checks one place only. It does not turn any screening label into a confirmed logjam. "
-                       "Add photos by editing `field_photos/photos.csv`.")
 
 # ---------------------------------------------------------------- static maps
 with T["Map gallery"]:
